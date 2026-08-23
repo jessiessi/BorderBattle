@@ -1,0 +1,32 @@
+name: BorderBattle
+version: '${version}'
+main: net.woistjojo.borderBattle.BorderBattle
+api-version: '1.21.11'
+load: POSTWORLD
+
+commands:
+  hallo:
+    description: Begruesst den Command-Sender.
+    usage: /hallo
+  mod:
+    description: Setzt dich als Moderator oder wieder als Spieler.
+    usage: /mod
+    permission: borderbattle.mod
+  challenge:
+    description: Startet oder stoppt die Challenge.
+    usage: /challenge <start|stop>
+    aliases:
+      - challange
+    permission: borderbattle.challenge
+  border:
+    description: Bewegt oder stoppt die WorldBorder.
+    usage: /border <go|stop>
+    permission: borderbattle.border
+
+permissions:
+  borderbattle.mod:
+    default: op
+  borderbattle.challenge:
+    default: op
+  borderbattle.border:
+    default: op
