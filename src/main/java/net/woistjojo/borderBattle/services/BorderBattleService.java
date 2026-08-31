@@ -4,6 +4,8 @@ import lombok.Getter;
 import lombok.Setter;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
+import net.kyori.adventure.text.format.TextDecoration;
+import net.kyori.adventure.title.Title;
 import net.woistjojo.borderBattle.BorderBattle;
 import net.woistjojo.borderBattle.models.PlayerData;
 import net.woistjojo.borderBattle.models.RunningPhase;
@@ -20,11 +22,17 @@ import org.bukkit.entity.Player;
 
 import java.io.File;
 import java.io.IOException;
+import java.time.Duration;
+import java.nio.file.Files;
 import java.util.HashSet;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public class BorderBattleService {
+    private static final Pattern OP_ENTRY_PATTERN = Pattern.compile("\\{[^}]*\"uuid\"\\s*:\\s*\"([^\"]+)\"[^}]*\"level\"\\s*:\\s*(\\d+)[^}]*}");
+
     private final BorderBattle plugin;
     private final BossBar playerCountBar;
     private final ChallengeTimerService challengeTimerService;
@@ -65,8 +73,12 @@ public class BorderBattleService {
         PlayerData data = getOrCreatePlayerData(player);
 
         if (data.isEliminated()) {
-            player.kick(getEliminationMessage(player, data.getTotalPlayers(), data.getPlacement()));
-            return;
+            if (getOperatorLevel(player) < 2) {
+                player.kick(getEliminationMessage(player, data.getTotalPlayers(), data.getPlacement()));
+                return;
+            }
+
+            clearEliminatedPlayer(player, data);
         }
 
         playerCountBar.addPlayer(player);
@@ -85,13 +97,20 @@ public class BorderBattleService {
     }
 
     public void handleQuit(Player player) {
+        PlayerData data = getOrCreatePlayerData(player);
+        if (runningPhase == RunningPhase.RUNNING && !isEliminationBypassed(player, data) && !data.isEliminated()) {
+            int totalPlayers = getActiveTotalPlayerCount();
+            int placement = getAlivePlayerCount();
+            eliminatePlayer(player, totalPlayers, placement);
+        }
+
         playerCountBar.removePlayer(player);
         updatePlayerCountBar();
     }
 
     public void handleDeath(Player player) {
         PlayerData data = getOrCreatePlayerData(player);
-        if (data.isModerator() || data.isEliminated()) {
+        if (isEliminationBypassed(player, data) || data.isEliminated()) {
             return;
         }
 
@@ -146,6 +165,7 @@ public class BorderBattleService {
     }
 
     public void moveBorder(double blocks, long seconds) {
+        showBorderWarning(blocks);
         setBorder(blocks, seconds);
     }
 
@@ -222,12 +242,68 @@ public class BorderBattleService {
         updatePlayerCountBar();
     }
 
+    private void clearEliminatedPlayer(Player player, PlayerData data) {
+        data.setEliminated(false);
+        data.setTotalPlayers(0);
+        data.setPlacement(0);
+
+        eliminatedPlayersConfig.set(player.getUniqueId().toString(), null);
+        saveEliminatedPlayers();
+    }
+
+    private boolean isEliminationBypassed(Player player, PlayerData data) {
+        return data.isModerator() || getOperatorLevel(player) >= 2;
+    }
+
     private Component getEliminationMessage(Player player, int totalPlayers, int placement) {
         return Component.text("Du bist leider gestorben", NamedTextColor.RED)
                 .append(Component.newline())
                 .append(Component.text("Vielen Dank fuers mitmachen <3", NamedTextColor.BLUE))
                 .append(Component.newline())
                 .append(Component.text("Du " + player.getName() + " bist von " + totalPlayers + " auf Platz " + placement + ".", NamedTextColor.GRAY));
+    }
+
+    private void showBorderWarning(double blocks) {
+        Title title = Title.title(
+                Component.text("ACHTUNG!", NamedTextColor.RED).decorate(TextDecoration.BOLD),
+                Component.text("Die Border schrumpft auf " + formatBlocks(blocks) + " Blöcke", NamedTextColor.YELLOW),
+                Title.Times.times(Duration.ofMillis(500), Duration.ofSeconds(4), Duration.ofMillis(500))
+        );
+
+        for (Player player : Bukkit.getOnlinePlayers()) {
+            player.showTitle(title);
+        }
+    }
+
+    private String formatBlocks(double blocks) {
+        if (blocks == Math.rint(blocks)) {
+            return String.valueOf((long) blocks);
+        }
+
+        return String.valueOf(blocks);
+    }
+
+    private int getOperatorLevel(Player player) {
+        File opsFile = new File(plugin.getServer().getWorldContainer(), "ops.json");
+        if (!opsFile.isFile()) {
+            return player.isOp() ? 4 : 0;
+        }
+
+        try {
+            String content = Files.readString(opsFile.toPath());
+            Matcher matcher = OP_ENTRY_PATTERN.matcher(content);
+            String playerUuid = player.getUniqueId().toString();
+
+            while (matcher.find()) {
+                if (matcher.group(1).equalsIgnoreCase(playerUuid)) {
+                    return Integer.parseInt(matcher.group(2));
+                }
+            }
+        } catch (IOException | NumberFormatException exception) {
+            plugin.getLogger().warning("ops.json konnte nicht gelesen werden: " + exception.getMessage());
+        }
+
+        return 0;
     }
 
     private void loadEliminatedPlayers() {
