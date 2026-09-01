@@ -22,14 +22,14 @@ public class ModCommand implements CommandExecutor {
         }
 
         if (!(sender instanceof Player player)) {
-            sender.sendMessage("Dieser Command kann nur von Spielern genutzt werden.");
+            sender.sendMessage("Dieser Command kann nur von Moderatoren genutzt werden.");
             return true;
         }
 
         boolean moderator = borderBattleService.toggleModerator(player);
 
         if (moderator) {
-            player.sendMessage("Du bist jetzt Moderator und wirst nicht mehr als Spieler gezaehlt.");
+            player.sendMessage("Du bist jetzt Moderator und wirst nicht mehr als Spieler gezählt.");
         } else {
             player.sendMessage("Du bist jetzt wieder Spieler.");
         }

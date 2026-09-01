@@ -11,6 +11,7 @@ import net.woistjojo.borderBattle.models.PlayerData;
 import net.woistjojo.borderBattle.models.RunningPhase;
 import org.bukkit.Bukkit;
 import org.bukkit.GameMode;
+import org.bukkit.GameRules;
 import org.bukkit.Location;
 import org.bukkit.World;
 import org.bukkit.WorldBorder;
@@ -18,24 +19,28 @@ import org.bukkit.boss.BarColor;
 import org.bukkit.boss.BarStyle;
 import org.bukkit.boss.BossBar;
 import org.bukkit.configuration.file.YamlConfiguration;
+import org.bukkit.entity.Mob;
 import org.bukkit.entity.Player;
+import org.bukkit.scheduler.BukkitTask;
 
 import java.io.File;
 import java.io.IOException;
 import java.time.Duration;
-import java.nio.file.Files;
+import java.time.Instant;
 import java.util.HashSet;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 public class BorderBattleService {
-    private static final Pattern OP_ENTRY_PATTERN = Pattern.compile("\\{[^}]*\"uuid\"\\s*:\\s*\"([^\"]+)\"[^}]*\"level\"\\s*:\\s*(\\d+)[^}]*}");
+    private static final double BORDER_WARNING_DISTANCE = 20.0;
+    private static final double MIN_BORDER_WARNING_SIZE = 100.0;
+    private static final Duration BORDER_WARNING_COOLDOWN = Duration.ofSeconds(10);
 
     private final BorderBattle plugin;
     private final BossBar playerCountBar;
     private final ChallengeTimerService challengeTimerService;
+    private final ConcurrentHashMap<UUID, Instant> lastBorderWarnings = new ConcurrentHashMap<>();
+    private BukkitTask borderWarningTask;
     private File eliminatedPlayersFile;
     private YamlConfiguration eliminatedPlayersConfig;
 
@@ -58,6 +63,8 @@ public class BorderBattleService {
         loadEliminatedPlayers();
         runningPhase = RunningPhase.JOINPHASE;
         setBorder(plugin.getPluginConfig().getWaitingBorderSize(), 0);
+        freezeWorld();
+        startBorderWarningTask();
 
         for (Player player : Bukkit.getOnlinePlayers()) {
             handleJoin(player);
@@ -65,6 +72,11 @@ public class BorderBattleService {
     }
 
     public void shutdown() {
+        if (borderWarningTask != null) {
+            borderWarningTask.cancel();
+            borderWarningTask = null;
+        }
+
         challengeTimerService.stop();
         playerCountBar.removeAll();
     }
@@ -72,21 +84,12 @@ public class BorderBattleService {
     public void handleJoin(Player player) {
         PlayerData data = getOrCreatePlayerData(player);
 
-        if (data.isEliminated()) {
-            if (getOperatorLevel(player) < 2) {
-                player.kick(getEliminationMessage(player, data.getTotalPlayers(), data.getPlacement()));
-                return;
-            }
-
-            clearEliminatedPlayer(player, data);
-        }
-
         playerCountBar.addPlayer(player);
 
-        if (data.isModerator()) {
+        if (data.isModerator() || data.isEliminated()) {
             player.setGameMode(GameMode.SPECTATOR);
         } else {
-            player.setGameMode(GameMode.SURVIVAL);
+            player.setGameMode(runningPhase == RunningPhase.RUNNING ? GameMode.SURVIVAL : GameMode.ADVENTURE);
             if (runningPhase != RunningPhase.RUNNING) {
                 teleportIntoBorder(player);
             }
@@ -94,23 +97,28 @@ public class BorderBattleService {
 
         updatePlayerCountBar();
         challengeTimerService.showTo(player);
+
+        if (data.isEliminated()) {
+            showEliminationFeedback(player, data.getTotalPlayers(), data.getPlacement());
+        }
     }
 
     public void handleQuit(Player player) {
         PlayerData data = getOrCreatePlayerData(player);
-        if (runningPhase == RunningPhase.RUNNING && !isEliminationBypassed(player, data) && !data.isEliminated()) {
+        if (runningPhase == RunningPhase.RUNNING && !data.isModerator() && !data.isEliminated()) {
             int totalPlayers = getActiveTotalPlayerCount();
             int placement = getAlivePlayerCount();
             eliminatePlayer(player, totalPlayers, placement);
         }
 
         playerCountBar.removePlayer(player);
+        lastBorderWarnings.remove(player.getUniqueId());
         updatePlayerCountBar();
     }
 
     public void handleDeath(Player player) {
         PlayerData data = getOrCreatePlayerData(player);
-        if (isEliminationBypassed(player, data) || data.isEliminated()) {
+        if (data.isModerator() || data.isEliminated()) {
             return;
         }
 
@@ -118,7 +126,10 @@ public class BorderBattleService {
         int placement = getAlivePlayerCount();
 
         eliminatePlayer(player, totalPlayers, placement);
-        Bukkit.getScheduler().runTask(plugin, () -> player.kick(getEliminationMessage(player, totalPlayers, placement)));
+        Bukkit.getScheduler().runTask(plugin, () -> {
+            player.setGameMode(GameMode.SPECTATOR);
+            showEliminationFeedback(player, totalPlayers, placement);
+        });
     }
 
     public boolean toggleModerator(Player player) {
@@ -126,7 +137,13 @@ public class BorderBattleService {
         boolean nowModerator = !data.isModerator();
 
         data.setModerator(nowModerator);
-        player.setGameMode(nowModerator ? GameMode.SPECTATOR : GameMode.SURVIVAL);
+        if (nowModerator) {
+            player.setGameMode(GameMode.SPECTATOR);
+        } else if (data.isEliminated()) {
+            player.setGameMode(GameMode.SPECTATOR);
+        } else {
+            player.setGameMode(runningPhase == RunningPhase.RUNNING ? GameMode.SURVIVAL : GameMode.ADVENTURE);
+        }
 
         updatePlayerCountBar();
         return nowModerator;
@@ -134,12 +151,13 @@ public class BorderBattleService {
 
     public void startChallenge() {
         runningPhase = RunningPhase.RUNNING;
+        unfreezeWorld();
         setBorder(plugin.getPluginConfig().getChallengeBorderSize(), 0);
         challengeTimerService.start();
 
         for (Player player : Bukkit.getOnlinePlayers()) {
             PlayerData data = getOrCreatePlayerData(player);
-            player.setGameMode(data.isModerator() ? GameMode.SPECTATOR : GameMode.SURVIVAL);
+            player.setGameMode(data.isModerator() || data.isEliminated() ? GameMode.SPECTATOR : GameMode.SURVIVAL);
         }
 
         updatePlayerCountBar();
@@ -150,13 +168,14 @@ public class BorderBattleService {
         challengeTimerService.stop();
         clearEliminatedPlayers();
         setBorder(plugin.getPluginConfig().getWaitingBorderSize(), 0);
+        freezeWorld();
 
         for (Player player : Bukkit.getOnlinePlayers()) {
             PlayerData data = getOrCreatePlayerData(player);
             if (data.isModerator()) {
                 player.setGameMode(GameMode.SPECTATOR);
             } else {
-                player.setGameMode(GameMode.SURVIVAL);
+                player.setGameMode(GameMode.ADVENTURE);
                 teleportIntoBorder(player);
             }
         }
@@ -251,16 +270,48 @@ public class BorderBattleService {
         saveEliminatedPlayers();
     }
 
-    private boolean isEliminationBypassed(Player player, PlayerData data) {
-        return data.isModerator() || getOperatorLevel(player) >= 2;
+    private void freezeWorld() {
+        for (World world : Bukkit.getWorlds()) {
+            world.setTime(0);
+            world.setStorm(false);
+            world.setThundering(false);
+            world.setGameRule(GameRules.ADVANCE_TIME, false);
+            world.setGameRule(GameRules.ADVANCE_WEATHER, false);
+            world.setGameRule(GameRules.SPAWN_MOBS, false);
+
+            for (Mob mob : world.getEntitiesByClass(Mob.class)) {
+                mob.remove();
+            }
+        }
     }
 
-    private Component getEliminationMessage(Player player, int totalPlayers, int placement) {
-        return Component.text("Du bist leider gestorben", NamedTextColor.RED)
-                .append(Component.newline())
-                .append(Component.text("Vielen Dank fuers mitmachen <3", NamedTextColor.BLUE))
-                .append(Component.newline())
-                .append(Component.text("Du " + player.getName() + " bist von " + totalPlayers + " auf Platz " + placement + ".", NamedTextColor.GRAY));
+    private void unfreezeWorld() {
+        for (World world : Bukkit.getWorlds()) {
+            world.setGameRule(GameRules.ADVANCE_TIME, true);
+            world.setGameRule(GameRules.ADVANCE_WEATHER, true);
+            world.setGameRule(GameRules.SPAWN_MOBS, true);
+        }
+    }
+
+    private void showEliminationFeedback(Player player, int totalPlayers, int placement) {
+        Component placementMessage = getPlacementMessage(player, totalPlayers, placement);
+        Title title = Title.title(
+                Component.text("AUSGESCHIEDEN!", NamedTextColor.RED).decorate(TextDecoration.BOLD),
+                placementMessage,
+                Title.Times.times(Duration.ofMillis(500), Duration.ofSeconds(4), Duration.ofMillis(500))
+        );
+
+        player.showTitle(title);
+        player.sendMessage(placementMessage);
+    }
+
+    private Component getPlacementMessage(Player player, int totalPlayers, int placement) {
+        return Component.text(player.getName().toUpperCase(), NamedTextColor.AQUA).decorate(TextDecoration.BOLD)
+                .append(Component.text(" DU BIST AUF ", NamedTextColor.YELLOW).decorate(TextDecoration.BOLD))
+                .append(Component.text("PLATZ " + placement, NamedTextColor.GOLD).decorate(TextDecoration.BOLD))
+                .append(Component.text(" VON ", NamedTextColor.YELLOW).decorate(TextDecoration.BOLD))
+                .append(Component.text(totalPlayers + " MITSPIELERN", NamedTextColor.GREEN).decorate(TextDecoration.BOLD))
+                .append(Component.text(" GEWORDEN!", NamedTextColor.YELLOW).decorate(TextDecoration.BOLD));
     }
 
     private void showBorderWarning(double blocks) {
@@ -275,35 +326,68 @@ public class BorderBattleService {
         }
     }
 
+    private void startBorderWarningTask() {
+        if (borderWarningTask != null) {
+            borderWarningTask.cancel();
+        }
+
+        borderWarningTask = Bukkit.getScheduler().runTaskTimer(plugin, this::warnPlayersNearBorder, 20L, 20L);
+    }
+
+    private void warnPlayersNearBorder() {
+        WorldBorder border = getMainBorder();
+        if (border.getSize() < MIN_BORDER_WARNING_SIZE) {
+            lastBorderWarnings.clear();
+            return;
+        }
+
+        Instant now = Instant.now();
+        for (Player player : Bukkit.getOnlinePlayers()) {
+            PlayerData data = getOrCreatePlayerData(player);
+            if (data.isModerator() || data.isEliminated() || !player.getWorld().equals(border.getWorld())) {
+                continue;
+            }
+
+            double distance = getDistanceToBorder(player.getLocation(), border);
+            if (distance > BORDER_WARNING_DISTANCE) {
+                lastBorderWarnings.remove(player.getUniqueId());
+                continue;
+            }
+
+            Instant lastWarning = lastBorderWarnings.get(player.getUniqueId());
+            if (lastWarning != null && Duration.between(lastWarning, now).compareTo(BORDER_WARNING_COOLDOWN) < 0) {
+                continue;
+            }
+
+            showPlayerNearBorderWarning(player);
+            lastBorderWarnings.put(player.getUniqueId(), now);
+        }
+    }
+
+    private double getDistanceToBorder(Location location, WorldBorder border) {
+        Location center = border.getCenter();
+        double halfSize = border.getSize() / 2.0;
+        double distanceX = halfSize - Math.abs(location.getX() - center.getX());
+        double distanceZ = halfSize - Math.abs(location.getZ() - center.getZ());
+        return Math.min(distanceX, distanceZ);
+    }
+
+    private void showPlayerNearBorderWarning(Player player) {
+        Title title = Title.title(
+                Component.text("ACHTUNG!!! " + "Border!", NamedTextColor.RED).decorate(TextDecoration.BOLD),
+                Component.text("Schrumpft sie, stirbst du.", NamedTextColor.YELLOW),
+                Title.Times.times(Duration.ofMillis(250), Duration.ofSeconds(4), Duration.ofMillis(500))
+        );
+
+        player.showTitle(title);
+    }
+
     private String formatBlocks(double blocks) {
         if (blocks == Math.rint(blocks)) {
             return String.valueOf((long) blocks);
         }
 
         return String.valueOf(blocks);
-    }
-
-    private int getOperatorLevel(Player player) {
-        File opsFile = new File(plugin.getServer().getWorldContainer(), "ops.json");
-        if (!opsFile.isFile()) {
-            return player.isOp() ? 4 : 0;
-        }
-
-        try {
-            String content = Files.readString(opsFile.toPath());
-            Matcher matcher = OP_ENTRY_PATTERN.matcher(content);
-            String playerUuid = player.getUniqueId().toString();
-
-            while (matcher.find()) {
-                if (matcher.group(1).equalsIgnoreCase(playerUuid)) {
-                    return Integer.parseInt(matcher.group(2));
-                }
-            }
-        } catch (IOException | NumberFormatException exception) {
-            plugin.getLogger().warning("ops.json konnte nicht gelesen werden: " + exception.getMessage());
-        }
-
-        return 0;
     }
 
     private void loadEliminatedPlayers() {
@@ -319,7 +403,7 @@ public class BorderBattleService {
 
                 playerData.put(uuid, new PlayerData(uuid, name, false, true, totalPlayers, placement));
             } catch (IllegalArgumentException ignored) {
-                plugin.getLogger().warning("Ungueltige UUID in eliminated-players.yml: " + uuidText);
+                plugin.getLogger().warning("Ungültige UUID in eliminated-players.yml: " + uuidText);
             }
         }
     }

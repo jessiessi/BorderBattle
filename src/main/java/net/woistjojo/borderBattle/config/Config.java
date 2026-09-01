@@ -23,7 +23,7 @@ public class Config {
     private BorderBattle plugin;
 
     private double waitingBorderSize = 20.0;
-    private double challengeBorderSize = 500.0;
+    private double challengeBorderSize = 1000.0;
 
     public static YamlConfigurationProperties getProperties(BorderBattle plugin) {
         return ConfigLib.BUKKIT_DEFAULT_PROPERTIES.toBuilder()
