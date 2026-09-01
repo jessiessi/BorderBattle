@@ -71,7 +71,7 @@ challengeBorderSize: 1000.0
 Die fertige Plugin-JAR wird hier erstellt:
 
 ```text
-build/libs/BorderBattle-1.0-SNAPSHOT-all.jar
+build/libs/BorderBattle-1.0.0-all.jar
 ```
 
 Diese JAR kommt in den `plugins`-Ordner eines Paper-Servers.
