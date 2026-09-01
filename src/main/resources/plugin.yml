@@ -19,6 +19,26 @@ commands:
     description: Bewegt oder stoppt die WorldBorder.
     usage: /border <go|stop>
     permission: borderbattle.border
+  glow:
+    description: Gibt allen Spielern fuer die angegebene Zeit den Glow-Effekt.
+    usage: /glow <sekunden>
+    permission: borderbattle.glow
+  schwer:
+    description: Setzt die Schwierigkeit auf schwer.
+    usage: /schwer
+    permission: borderbattle.difficulty
+  low:
+    description: Setzt die Schwierigkeit auf einfach.
+    usage: /low
+    permission: borderbattle.difficulty
+  schwerer:
+    description: Erhoeht die Schwierigkeit um eine Stufe.
+    usage: /schwerer
+    permission: borderbattle.difficulty
+  lower:
+    description: Senkt die Schwierigkeit um eine Stufe.
+    usage: /lower
+    permission: borderbattle.difficulty
 
 permissions:
   borderbattle.mod:
@@ -26,4 +46,8 @@ permissions:
   borderbattle.challenge:
     default: op
   borderbattle.border:
+    default: op
+  borderbattle.glow:
+    default: op
+  borderbattle.difficulty:
     default: op

@@ -10,6 +10,7 @@ import net.woistjojo.borderBattle.BorderBattle;
 import net.woistjojo.borderBattle.models.PlayerData;
 import net.woistjojo.borderBattle.models.RunningPhase;
 import org.bukkit.Bukkit;
+import org.bukkit.Difficulty;
 import org.bukkit.GameMode;
 import org.bukkit.GameRules;
 import org.bukkit.Location;
@@ -21,6 +22,8 @@ import org.bukkit.boss.BossBar;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Mob;
 import org.bukkit.entity.Player;
+import org.bukkit.potion.PotionEffect;
+import org.bukkit.potion.PotionEffectType;
 import org.bukkit.scheduler.BukkitTask;
 
 import java.io.File;
@@ -195,6 +198,31 @@ public class BorderBattleService {
 
     public boolean isChallengeRunning() {
         return runningPhase == RunningPhase.RUNNING;
+    }
+
+    public int glowOnlinePlayers(int seconds) {
+        int affectedPlayers = 0;
+        PotionEffect glowEffect = new PotionEffect(PotionEffectType.GLOWING, seconds * 20, 0, false, false, true);
+
+        for (Player player : Bukkit.getOnlinePlayers()) {
+            player.addPotionEffect(glowEffect);
+            affectedPlayers++;
+        }
+
+        return affectedPlayers;
+    }
+
+    public void setDifficulty(Difficulty difficulty) {
+        for (World world : Bukkit.getWorlds()) {
+            world.setDifficulty(difficulty);
+        }
+    }
+
+    public Difficulty changeDifficulty(int steps) {
+        Difficulty difficulty = getMainWorld().getDifficulty();
+        Difficulty newDifficulty = getDifficultyByLevel(getDifficultyLevel(difficulty) + steps);
+        setDifficulty(newDifficulty);
+        return newDifficulty;
     }
 
     private PlayerData getOrCreatePlayerData(Player player) {
@@ -449,8 +477,29 @@ public class BorderBattleService {
     }
 
     private WorldBorder getMainBorder() {
-        World world = Bukkit.getWorlds().getFirst();
-        return world.getWorldBorder();
+        return getMainWorld().getWorldBorder();
+    }
+
+    private World getMainWorld() {
+        return Bukkit.getWorlds().getFirst();
+    }
+
+    private int getDifficultyLevel(Difficulty difficulty) {
+        return switch (difficulty) {
+            case PEACEFUL -> 0;
+            case EASY -> 1;
+            case NORMAL -> 2;
+            case HARD -> 3;
+        };
+    }
+
+    private Difficulty getDifficultyByLevel(int level) {
+        return switch (Math.max(0, Math.min(3, level))) {
+            case 0 -> Difficulty.PEACEFUL;
+            case 1 -> Difficulty.EASY;
+            case 2 -> Difficulty.NORMAL;
+            default -> Difficulty.HARD;
+        };
     }
 
     private void teleportIntoBorder(Player player) {
