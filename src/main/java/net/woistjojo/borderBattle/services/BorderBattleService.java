@@ -10,18 +10,22 @@ import net.woistjojo.borderBattle.BorderBattle;
 import net.woistjojo.borderBattle.models.PlayerData;
 import net.woistjojo.borderBattle.models.RunningPhase;
 import org.bukkit.Bukkit;
+import org.bukkit.Color;
 import org.bukkit.Difficulty;
 import org.bukkit.GameMode;
 import org.bukkit.GameRules;
 import org.bukkit.Location;
+import org.bukkit.Material;
 import org.bukkit.World;
 import org.bukkit.WorldBorder;
 import org.bukkit.boss.BarColor;
 import org.bukkit.boss.BarStyle;
 import org.bukkit.boss.BossBar;
 import org.bukkit.configuration.file.YamlConfiguration;
+import org.bukkit.entity.Firework;
 import org.bukkit.entity.Mob;
 import org.bukkit.entity.Player;
+import org.bukkit.inventory.meta.FireworkMeta;
 import org.bukkit.potion.PotionEffect;
 import org.bukkit.potion.PotionEffectType;
 import org.bukkit.scheduler.BukkitTask;
@@ -44,6 +48,7 @@ public class BorderBattleService {
     private final ChallengeTimerService challengeTimerService;
     private final ConcurrentHashMap<UUID, Instant> lastBorderWarnings = new ConcurrentHashMap<>();
     private BukkitTask borderWarningTask;
+    private BukkitTask victoryFireworkTask;
     private File eliminatedPlayersFile;
     private YamlConfiguration eliminatedPlayersConfig;
 
@@ -80,6 +85,7 @@ public class BorderBattleService {
             borderWarningTask = null;
         }
 
+        cancelVictoryFireworks();
         challengeTimerService.stop();
         playerCountBar.removeAll();
     }
@@ -130,7 +136,7 @@ public class BorderBattleService {
 
         eliminatePlayer(player, totalPlayers, placement);
         Bukkit.getScheduler().runTask(plugin, () -> {
-            player.setGameMode(GameMode.SPECTATOR);
+            player.setGameMode(runningPhase == RunningPhase.RUNNING ? GameMode.SPECTATOR : GameMode.ADVENTURE);
             showEliminationFeedback(player, totalPlayers, placement);
         });
     }
@@ -153,6 +159,7 @@ public class BorderBattleService {
     }
 
     public void startChallenge() {
+        cancelVictoryFireworks();
         runningPhase = RunningPhase.RUNNING;
         unfreezeWorld();
         setBorder(plugin.getPluginConfig().getChallengeBorderSize(), 0);
@@ -167,6 +174,7 @@ public class BorderBattleService {
     }
 
     public void stopChallenge() {
+        cancelVictoryFireworks();
         runningPhase = RunningPhase.JOINPHASE;
         challengeTimerService.stop();
         clearEliminatedPlayers();
@@ -287,6 +295,121 @@ public class BorderBattleService {
         eliminatedPlayersConfig.set(path + ".placement", placement);
         saveEliminatedPlayers();
         updatePlayerCountBar();
+        checkForWinner();
+    }
+
+    private void checkForWinner() {
+        if (runningPhase != RunningPhase.RUNNING) {
+            return;
+        }
+
+        Player winner = null;
+        int alivePlayers = 0;
+
+        for (Player player : Bukkit.getOnlinePlayers()) {
+            PlayerData data = getOrCreatePlayerData(player);
+            if (!data.isModerator() && !data.isEliminated()) {
+                winner = player;
+                alivePlayers++;
+            }
+        }
+
+        if (alivePlayers == 1 && winner != null) {
+            finishChallengeWithWinner(winner);
+        }
+    }
+
+    private void finishChallengeWithWinner(Player winner) {
+        runningPhase = RunningPhase.FINISHED;
+        challengeTimerService.stop();
+        setBorder(plugin.getPluginConfig().getWaitingBorderSize(), 0);
+        freezeWorld();
+
+        Location spawn = getMainWorld().getSpawnLocation();
+        Location stageLocation = createVictoryStage(spawn);
+
+        for (Player player : Bukkit.getOnlinePlayers()) {
+            PlayerData data = getOrCreatePlayerData(player);
+            if (data.isModerator()) {
+                player.setGameMode(GameMode.SPECTATOR);
+                player.teleport(spawn);
+                continue;
+            }
+
+            player.setGameMode(GameMode.ADVENTURE);
+            player.teleport(player.getUniqueId().equals(winner.getUniqueId()) ? stageLocation : spawn);
+        }
+
+        Bukkit.broadcast(Component.text(winner.getName() + " Herzlichen Glückwunsch zum Sieg", NamedTextColor.GOLD)
+                .decorate(TextDecoration.BOLD));
+        startVictoryFireworks(stageLocation);
+        clearEliminatedPlayers();
+        runningPhase = RunningPhase.JOINPHASE;
+        updatePlayerCountBar();
+    }
+
+    private Location createVictoryStage(Location spawn) {
+        World world = spawn.getWorld();
+        if (world == null) {
+            return spawn;
+        }
+
+        int centerX = spawn.getBlockX() + 8;
+        int centerZ = spawn.getBlockZ();
+        int groundY = world.getHighestBlockYAt(centerX, centerZ);
+        int platformY = groundY + 2;
+
+        for (int x = -2; x <= 2; x++) {
+            for (int z = -2; z <= 2; z++) {
+                Material material = Math.abs(x) == 2 || Math.abs(z) == 2 ? Material.SMOOTH_QUARTZ_SLAB : Material.SMOOTH_QUARTZ;
+                world.getBlockAt(centerX + x, platformY - 1, centerZ + z).setType(material);
+                world.getBlockAt(centerX + x, platformY, centerZ + z).setType(Material.AIR);
+                world.getBlockAt(centerX + x, platformY + 1, centerZ + z).setType(Material.AIR);
+            }
+        }
+
+        world.getBlockAt(centerX, platformY - 1, centerZ).setType(Material.GOLD_BLOCK);
+        return new Location(world, centerX + 0.5, platformY, centerZ + 0.5, 90.0F, 0.0F);
+    }
+
+    private void startVictoryFireworks(Location stageLocation) {
+        cancelVictoryFireworks();
+
+        final int[] launches = {0};
+        victoryFireworkTask = Bukkit.getScheduler().runTaskTimer(plugin, () -> {
+            if (launches[0] >= 10) {
+                cancelVictoryFireworks();
+                return;
+            }
+
+            double sideOffset = launches[0] % 2 == 0 ? -3.5 : 3.5;
+            Location fireworkLocation = stageLocation.clone().add(0.0, 0.2, sideOffset);
+            spawnVictoryFirework(fireworkLocation);
+            launches[0]++;
+        }, 0L, 10L);
+    }
+
+    private void spawnVictoryFirework(Location location) {
+        Firework firework = location.getWorld().spawn(location, Firework.class);
+        FireworkMeta meta = firework.getFireworkMeta();
+
+        meta.setPower(1);
+        meta.addEffect(org.bukkit.FireworkEffect.builder()
+                .with(org.bukkit.FireworkEffect.Type.BALL_LARGE)
+                .withColor(Color.YELLOW, Color.ORANGE)
+                .withFade(Color.WHITE)
+                .trail(true)
+                .flicker(true)
+                .build());
+
+        firework.setFireworkMeta(meta);
+    }
+
+    private void cancelVictoryFireworks() {
+        if (victoryFireworkTask != null) {
+            victoryFireworkTask.cancel();
+            victoryFireworkTask = null;
+        }
     }
 
     private void clearEliminatedPlayer(Player player, PlayerData data) {
